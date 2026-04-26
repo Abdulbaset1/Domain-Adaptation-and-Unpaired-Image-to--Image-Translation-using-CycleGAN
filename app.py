@@ -54,7 +54,7 @@ class Generator(nn.Module):
 
 @st.cache_resource
 def load_model():
-    # Fixed: Removed the extra quote at the end
+    # FIXED: Removed the extra quote at the end of this line
     MODEL_URL = "https://github.com/Abdulbaset1/Domain-Adaptation-and-Unpaired-Image-to--Image-Translation-using-CycleGAN/releases/download/v1/cyclegan_model.pth"
     weights_path = "/tmp/cyclegan_weights.pth"
 
