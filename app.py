@@ -54,7 +54,8 @@ class Generator(nn.Module):
 
 @st.cache_resource
 def load_model():
-    MODEL_URL = "https://github.com/Abdulbaset1/Domain-Adaptation-and-Unpaired-Image-to--Image-Translation-using-CycleGAN/releases/download/v1/cyclegan_model.pth"
+    # Method 1: Use single quotes instead
+    MODEL_URL = 'https://github.com/Abdulbaset1/Domain-Adaptation-and-Unpaired-Image-to--Image-Translation-using-CycleGAN/releases/download/v1/cyclegan_model.pth'
     weights_path = "/tmp/cyclegan_weights.pth"
 
     if not os.path.exists(weights_path):
