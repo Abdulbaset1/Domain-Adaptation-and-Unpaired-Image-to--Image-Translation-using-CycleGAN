@@ -10,6 +10,7 @@ from io import BytesIO
 import numpy as np
 from torchvision import transforms
 import matplotlib.pyplot as plt
+import sys
 
 # Page configuration
 st.set_page_config(
@@ -22,7 +23,17 @@ st.set_page_config(
 MODEL_URL = "https://github.com/Abdulbaset1/Domain-Adaptation-and-Unpaired-Image-to--Image-Translation-using-CycleGAN/releases/download/v1/cyclegan_model.pth"
 
 # Device configuration
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+@st.cache_resource
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+DEVICE = get_device()
+st.sidebar.info(f"Using device: {DEVICE}")
 
 # Define the model architecture (same as training)
 class ResBlock(nn.Module):
@@ -89,7 +100,13 @@ def load_model():
         # Create a temporary file to store the model
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
             st.info("📥 Downloading model from GitHub release...")
-            response = requests.get(MODEL_URL, stream=True)
+            
+            # Add headers to avoid rate limiting
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(MODEL_URL, stream=True, headers=headers)
             response.raise_for_status()
             
             # Download with progress bar
@@ -98,22 +115,25 @@ def load_model():
             downloaded = 0
             
             for chunk in response.iter_content(chunk_size=8192):
-                tmp_file.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0:
-                    progress = downloaded / total_size
-                    progress_bar.progress(min(progress, 1.0))
+                if chunk:
+                    tmp_file.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        progress = downloaded / total_size
+                        progress_bar.progress(min(progress, 1.0))
             
             progress_bar.empty()
             tmp_file_path = tmp_file.name
         
         # Load the model
         st.info("🔧 Loading model architecture...")
-        model = Generator().to(DEVICE)
+        model = Generator()
         
         st.info("📦 Loading model weights...")
-        state_dict = torch.load(tmp_file_path, map_location=DEVICE)
+        # Use weights_only=False to avoid compatibility issues
+        state_dict = torch.load(tmp_file_path, map_location=DEVICE, weights_only=False)
         model.load_state_dict(state_dict)
+        model = model.to(DEVICE)
         model.eval()
         
         # Clean up temp file
@@ -124,14 +144,15 @@ def load_model():
         
     except Exception as e:
         st.error(f"❌ Error loading model: {str(e)}")
+        st.error("Please check that the model file exists at the provided URL")
         return None
 
 def transform_image(image, target_size=256):
     """Transform input image for the model"""
     transform = transforms.Compose([
-        transforms.Resize((target_size, target_size)),
+        transforms.Resize((target_size, target_size), Image.BICUBIC),
         transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5])
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
     
     if image.mode != 'RGB':
@@ -189,6 +210,11 @@ with st.sidebar:
     3. Wait for processing
     4. Download the result
     """)
+    
+    # Show Python version for debugging
+    st.markdown("---")
+    st.markdown("### 🔧 Debug Info")
+    st.code(f"Python: {sys.version.split()[0]}\nPyTorch: {torch.__version__}\nDevice: {DEVICE}")
 
 # Main content area
 col1, col2 = st.columns(2)
@@ -252,6 +278,7 @@ if uploaded_file is not None:
                 
         except Exception as e:
             st.error(f"Error during translation: {str(e)}")
+            st.exception(e)
 else:
     # Show example when no image is uploaded
     st.info("👈 Please upload an image to get started!")
