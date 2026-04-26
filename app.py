@@ -1,315 +1,202 @@
-# app.py
 import streamlit as st
 import torch
-import torch.nn as nn
 from PIL import Image
-import requests
-import os
-import tempfile
-from io import BytesIO
 import numpy as np
-from torchvision import transforms
-import matplotlib.pyplot as plt
-import sys
+import requests
+from io import BytesIO
+import tempfile
+import os
+import torch.nn as nn
+from streamlit_drawable_canvas import st_canvas
 
-# Page configuration
-st.set_page_config(
-    page_title="CycleGAN Image Translation",
-    page_icon="🎨",
-    layout="wide"
-)
+st.set_page_config(page_title="Sketch to Photo - CycleGAN", page_icon="🎨", layout="wide")
 
-# Model URL from GitHub release
-MODEL_URL = "https://github.com/Abdulbaset1/Domain-Adaptation-and-Unpaired-Image-to--Image-Translation-using-CycleGAN/releases/download/v1/cyclegan_model.pth"
-
-# Device configuration
-@st.cache_resource
-def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
-
-DEVICE = get_device()
-st.sidebar.info(f"Using device: {DEVICE}")
-
-# Define the model architecture (same as training)
-class ResBlock(nn.Module):
+class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.block = nn.Sequential(
-            nn.Conv2d(channels, channels, 3, 1, 1),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(channels, channels, 3),
             nn.InstanceNorm2d(channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(channels, channels, 3, 1, 1),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(channels, channels, 3),
             nn.InstanceNorm2d(channels)
         )
-
     def forward(self, x):
         return x + self.block(x)
 
 class Generator(nn.Module):
-    def __init__(self):
+    def __init__(self, in_channels=3, out_channels=3, n_res_blocks=6):
         super().__init__()
-        
-        layers = [
-            nn.Conv2d(3, 64, 7, 1, 3),
+        model = [
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(in_channels, 64, 7),
             nn.InstanceNorm2d(64),
             nn.ReLU(inplace=True)
         ]
-        
-        # Downsample
-        in_c = 64
+        in_f, out_f = 64, 128
         for _ in range(2):
-            layers += [
-                nn.Conv2d(in_c, in_c*2, 3, 2, 1),
-                nn.InstanceNorm2d(in_c*2),
-                nn.ReLU(inplace=True)
-            ]
-            in_c *= 2
-        
-        # 6 ResBlocks
-        for _ in range(6):
-            layers.append(ResBlock(in_c))
-        
-        # Upsample
+            model += [nn.Conv2d(in_f, out_f, 3, stride=2, padding=1),
+                      nn.InstanceNorm2d(out_f), nn.ReLU(inplace=True)]
+            in_f, out_f = out_f, out_f * 2
+        for _ in range(n_res_blocks):
+            model += [ResidualBlock(in_f)]
+        out_f = in_f // 2
         for _ in range(2):
-            layers += [
-                nn.ConvTranspose2d(in_c, in_c//2, 3, 2, 1, output_padding=1),
-                nn.InstanceNorm2d(in_c//2),
-                nn.ReLU(inplace=True)
-            ]
-            in_c //= 2
-        
-        layers += [
-            nn.Conv2d(in_c, 3, 7, 1, 3),
-            nn.Tanh()
-        ]
-        
-        self.model = nn.Sequential(*layers)
-    
+            model += [nn.ConvTranspose2d(in_f, out_f, 3, stride=2, padding=1, output_padding=1),
+                      nn.InstanceNorm2d(out_f), nn.ReLU(inplace=True)]
+            in_f, out_f = out_f, out_f // 2
+        model += [nn.ReflectionPad2d(3), nn.Conv2d(64, out_channels, 7), nn.Tanh()]
+        self.model = nn.Sequential(*model)
     def forward(self, x):
         return self.model(x)
 
 @st.cache_resource
 def load_model():
-    """Load the CycleGAN model from GitHub release"""
-    try:
-        # Create a temporary file to store the model
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as tmp_file:
-            st.info("📥 Downloading model from GitHub release...")
-            
-            # Add headers to avoid rate limiting
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            response = requests.get(MODEL_URL, stream=True, headers=headers)
+    MODEL_URL = "https://github.com/Mustehsan-Nisar-Rao/Cyclic-GAN/releases/download/v.1/cyclegan_best_model.pth"
+    weights_path = "/tmp/cyclegan_weights.pth"
+
+    if not os.path.exists(weights_path):
+        with st.spinner("Model download ho raha hai..."):
+            response = requests.get(MODEL_URL, stream=True)
             response.raise_for_status()
-            
-            # Download with progress bar
-            total_size = int(response.headers.get('content-length', 0))
-            progress_bar = st.progress(0)
+            total = int(response.headers.get('content-length', 0))
+            progress = st.progress(0)
             downloaded = 0
-            
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    tmp_file.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        progress = downloaded / total_size
-                        progress_bar.progress(min(progress, 1.0))
-            
-            progress_bar.empty()
-            tmp_file_path = tmp_file.name
-        
-        # Load the model
-        st.info("🔧 Loading model architecture...")
-        model = Generator()
-        
-        st.info("📦 Loading model weights...")
-        # Use weights_only=False to avoid compatibility issues
-        state_dict = torch.load(tmp_file_path, map_location=DEVICE, weights_only=False)
-        model.load_state_dict(state_dict)
-        model = model.to(DEVICE)
-        model.eval()
-        
-        # Clean up temp file
-        os.unlink(tmp_file_path)
-        
-        st.success("✅ Model loaded successfully!")
-        return model
-        
+            with open(weights_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            progress.progress(min(downloaded / total, 1.0))
+            progress.empty()
+
+    try:
+        checkpoint = torch.load(weights_path, map_location='cpu', weights_only=False)
     except Exception as e:
-        st.error(f"❌ Error loading model: {str(e)}")
-        st.error("Please check that the model file exists at the provided URL")
+        os.remove(weights_path)
+        st.error(f"Model load error: {e}")
         return None
 
-def transform_image(image, target_size=256):
-    """Transform input image for the model"""
-    transform = transforms.Compose([
-        transforms.Resize((target_size, target_size), Image.BICUBIC),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-    ])
-    
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
-    
-    tensor = transform(image).unsqueeze(0)  # Add batch dimension
-    return tensor.to(DEVICE)
+    model = Generator()
+    model.load_state_dict(checkpoint['G_S2P'])
+    model.eval()
+    return model
 
-def denormalize(tensor):
-    """Denormalize tensor to displayable image"""
-    return tensor * 0.5 + 0.5
+def preprocess(image):
+    image = image.resize((128, 128))
+    img = np.array(image).astype(np.float32) / 127.5 - 1.0
+    return torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0)
 
-def translate_image(model, image_tensor):
-    """Translate image using the model"""
+def postprocess(tensor):
+    tensor = tensor.squeeze(0).permute(1, 2, 0).numpy()
+    tensor = (tensor + 1.0) / 2.0
+    tensor = np.clip(tensor, 0, 1)
+    return Image.fromarray((tensor * 255).astype(np.uint8))
+
+def generate(img, model):
     with torch.no_grad():
-        output = model(image_tensor)
-    return denormalize(output)
+        tensor = preprocess(img)
+        output = model(tensor)
+    return postprocess(output)
 
-def tensor_to_pil(tensor):
-    """Convert tensor to PIL image"""
-    tensor = tensor.squeeze(0).cpu()
-    tensor = tensor.clamp(0, 1)
-    img = transforms.ToPILImage()(tensor)
-    return img
+st.title("Sketch to Photo Translation")
+st.markdown("*Powered by CycleGAN*")
 
-# Main UI
-st.title("🎨 CycleGAN: Sketch to Photo Translation")
-st.markdown("""
-This application uses a CycleGAN model to translate between **sketches and photos**.
-Upload an image and choose the translation direction!
-""")
-
-# Sidebar
-with st.sidebar:
-    st.header("⚙️ Settings")
-    translation_direction = st.radio(
-        "Select translation direction:",
-        ["Sketch → Photo", "Photo → Sketch"],
-        help="Choose which transformation you want to apply"
-    )
-    
-    st.markdown("---")
-    st.markdown("### ℹ️ About")
-    st.markdown("""
-    - **Model**: CycleGAN trained on sketches and photos
-    - **Architecture**: Generator with ResNet blocks
-    - **Input Size**: 256x256 pixels
-    """)
-    
-    st.markdown("---")
-    st.markdown("### 📝 Instructions")
-    st.markdown("""
-    1. Upload an image (JPG, PNG)
-    2. Select translation direction
-    3. Wait for processing
-    4. Download the result
-    """)
-    
-    # Show Python version for debugging
-    st.markdown("---")
-    st.markdown("### 🔧 Debug Info")
-    st.code(f"Python: {sys.version.split()[0]}\nPyTorch: {torch.__version__}\nDevice: {DEVICE}")
-
-# Main content area
-col1, col2 = st.columns(2)
-
-# Load model
 model = load_model()
-
 if model is None:
+    st.error("Model load nahi hua!")
     st.stop()
+st.success("Model ready!")
 
-# File uploader
-uploaded_file = st.file_uploader(
-    "Choose an image...",
-    type=['jpg', 'jpeg', 'png', 'bmp', 'tiff'],
-    help="Upload an image to translate"
-)
+tab1, tab2 = st.tabs(["Draw Sketch", "Upload Sketch"])
 
-if uploaded_file is not None:
-    # Load and display original image
-    original_image = Image.open(uploaded_file)
-    
+with tab1:
+    st.markdown("Neeche sketch banao aur Generate button dabao!")
+    col1, col2 = st.columns(2)
+
     with col1:
-        st.subheader("📷 Original Image")
-        st.image(original_image, use_container_width=True)
-        
-        # Display image info
-        st.caption(f"Size: {original_image.size[0]} x {original_image.size[1]} pixels")
-        st.caption(f"Mode: {original_image.mode}")
-    
-    # Transform and translate
-    with st.spinner("🔄 Processing image... This may take a few seconds."):
-        try:
-            # Transform image
-            input_tensor = transform_image(original_image)
-            
-            # Translate
-            output_tensor = translate_image(model, input_tensor)
-            
-            # Convert to PIL
-            output_image = tensor_to_pil(output_tensor)
-            
-            # Display output
-            with col2:
-                if translation_direction == "Sketch → Photo":
-                    st.subheader("🎨 Generated Photo")
-                else:
-                    st.subheader("✏️ Generated Sketch")
-                st.image(output_image, use_container_width=True)
-                
-                # Download button
-                buf = BytesIO()
-                output_image.save(buf, format="PNG")
-                byte_im = buf.getvalue()
-                
-                st.download_button(
-                    label="📥 Download Result",
-                    data=byte_im,
-                    file_name=f"translated_{uploaded_file.name.split('.')[0]}.png",
-                    mime="image/png"
-                )
-                
-        except Exception as e:
-            st.error(f"Error during translation: {str(e)}")
-            st.exception(e)
-else:
-    # Show example when no image is uploaded
-    st.info("👈 Please upload an image to get started!")
-    
-    # Display example images
-    st.markdown("### 📸 Example Usage")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("**Input Sketch** →")
-        st.markdown("*(Upload a sketch to convert to photo)*")
-    
+        st.subheader("Drawing Canvas")
+        brush_size  = st.slider("Brush size", 1, 30, 8)
+        brush_color = st.color_picker("Brush color", "#000000")
+
+        canvas_result = st_canvas(
+            fill_color       = "rgba(255, 255, 255, 0)",
+            stroke_width     = brush_size,
+            stroke_color     = brush_color,
+            background_color = "#FFFFFF",
+            height           = 400,
+            width            = 400,
+            drawing_mode     = "freedraw",
+            key              = "canvas",
+        )
+
+        generate_btn = st.button("Generate Photo", type="primary", use_container_width=True)
+
     with col2:
-        st.markdown("**Input Photo** →")
-        st.markdown("*(Upload a photo to convert to sketch)*")
-    
-    with col3:
-        st.markdown("**⚡ Features**")
-        st.markdown("""
-        - Real-time translation
-        - High-quality results
-        - Maintains structural consistency
-        """)
+        st.subheader("Generated Photo")
+        if generate_btn:
+            if canvas_result.image_data is not None:
+                img_array  = canvas_result.image_data.astype(np.uint8)
+                canvas_img = Image.fromarray(img_array).convert("RGB")
+                img_np     = np.array(canvas_img)
 
-# Footer
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center'>
-        <p>Built with ❤️ using CycleGAN | Model trained on sketches and CIFAR-10 photos</p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+                if img_np.mean() > 250:
+                    st.warning("Pehle kuch draw karo!")
+                else:
+                    with st.spinner("Generating..."):
+                        result = generate(canvas_img, model)
+                    st.image(result, use_container_width=True, caption="Generated Photo")
+                    buf = BytesIO()
+                    result.save(buf, format="PNG")
+                    st.download_button(
+                        "Download Photo",
+                        buf.getvalue(),
+                        "generated_photo.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+            else:
+                st.warning("Pehle kuch draw karo!")
+        else:
+            st.info("Left side pe sketch banao phir Generate dabao!")
+
+with tab2:
+    st.markdown("Sketch upload karo!")
+    uploaded = st.file_uploader("Image choose karo", type=['png', 'jpg', 'jpeg'])
+
+    if uploaded:
+        sketch = Image.open(uploaded).convert("RGB")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Input Sketch")
+            st.image(sketch, use_container_width=True)
+        with col2:
+            st.subheader("Generated Photo")
+            with st.spinner("Generating..."):
+                result = generate(sketch, model)
+            st.image(result, use_container_width=True)
+            buf = BytesIO()
+            result.save(buf, format="PNG")
+            st.download_button(
+                "Download Photo",
+                buf.getvalue(),
+                "generated_photo.png",
+                mime="image/png",
+                use_container_width=True
+            )
+
+st.sidebar.markdown("""
+**Model:** CycleGAN  
+**Training:** 50 epochs  
+**Dataset:** Sketchy Database  
+**Image size:** 128x128
+
+**How to use:**  
+1. Draw tab mein sketch banao  
+2. Ya Upload tab mein image upload karo  
+3. Generate button dabao  
+4. Photo download karo!
+""")
